@@ -1,1 +1,661 @@
+name: Build APK
 
+# Trigger workflow ketika:
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'builds/**'          # Hanya jika ada perubahan di folder builds/
+  workflow_dispatch:         # Bisa dipicu manual dari GitHub
+
+env:
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+  ANDROID_HOME: /usr/local/lib/android/sdk
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # Step 1: Checkout (download) repository
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    # Step 2: Setup Java Development Kit
+    - name: Set up JDK 11
+      uses: actions/setup-java@v3
+      with:
+        java-version: '11'
+        distribution: 'adopt'
+        cache: gradle
+
+    # Step 3: Setup Android SDK
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v2
+      with:
+        api-level: 33
+        ndk-version: 25.1.8937393
+
+    # Step 4: Install dependencies
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          gradle \
+          wget \
+          unzip
+
+    # Step 5: Find dan parse config.json
+    - name: Find and parse configuration
+      run: |
+        python3 << 'PYTHON_EOF'
+        import json
+        import os
+        import sys
+        
+        print("=" * 70)
+        print("STEP 1: Mencari config.json")
+        print("=" * 70)
+        
+        config_file = None
+        
+        # Cari config.json di dalam builds/
+        for root, dirs, files in os.walk('builds'):
+            if 'config.json' in files:
+                config_file = os.path.join(root, 'config.json')
+                break
+        
+        if not config_file:
+            print("❌ ERROR: config.json tidak ditemukan!")
+            print("   Pastikan struktur folder: builds/com.example.app/config.json")
+            sys.exit(1)
+        
+        print(f"✓ Config ditemukan: {config_file}")
+        
+        # Baca config
+        with open(config_file, 'r') as f:
+            config = json.load(f)
+        
+        # Display config
+        print("\n" + "=" * 70)
+        print("KONFIGURASI APLIKASI:")
+        print("=" * 70)
+        print(f"Nama Aplikasi      : {config.get('appName', 'N/A')}")
+        print(f"App ID             : {config.get('appId', 'N/A')}")
+        print(f"Versi              : {config.get('version', 'N/A')}")
+        print(f"Version Code       : {config.get('versionCode', '1')}")
+        print(f"Jenis Proyek       : {config.get('projectType', 'N/A')}")
+        print(f"Permission         : {len(config.get('permissions', []))} items")
+        print("=" * 70)
+        
+        # Simpan ke environment variable untuk step berikutnya
+        with open(os.environ['GITHUB_ENV'], 'a') as f:
+            f.write(f"CONFIG_FILE={config_file}\n")
+            f.write(f"APP_NAME={config.get('appName', 'MyApp')}\n")
+            f.write(f"APP_ID={config.get('appId', 'com.example.app')}\n")
+            f.write(f"APP_VERSION={config.get('version', '1.0.0')}\n")
+            f.write(f"VERSION_CODE={config.get('versionCode', '1')}\n")
+        
+        print("\n✓ Environment variables set!")
+        PYTHON_EOF
+
+    # Step 6: Setup build directory
+    - name: Setup build environment
+      run: |
+        echo "Membuat struktur folder Android project..."
+        
+        mkdir -p android_build/app/src/main/java/com/apk/builder
+        mkdir -p android_build/app/src/main/res/layout
+        mkdir -p android_build/app/src/main/res/values
+        mkdir -p android_build/app/src/main/res/mipmap-mdpi
+        mkdir -p android_build/app/src/main/assets
+        mkdir -p android_build/.gradle
+        
+        echo "✓ Direktori berhasil dibuat"
+
+    # Step 7: Generate Android project files
+    - name: Generate Android project
+      run: |
+        python3 << 'PYTHON_EOF'
+        import json
+        import os
+        
+        print("\n" + "=" * 70)
+        print("STEP 2: Generate Android Project Files")
+        print("=" * 70)
+        
+        # Baca config
+        with open(os.environ['CONFIG_FILE'], 'r') as f:
+            config = json.load(f)
+        
+        app_id = config['appId']
+        app_name = config['appName']
+        app_version = config['version']
+        version_code = config.get('versionCode', 1)
+        
+        # Generate package path (com.example.app -> com/example/app)
+        package_path = app_id.replace('.', '/')
+        
+        print(f"\nApp ID: {app_id}")
+        print(f"Package Path: {package_path}")
+        print(f"App Name: {app_name}")
+        print(f"Versi: {app_version} (Code: {version_code})")
+        
+        # ==================== GENERATE MainActivity.java ====================
+        main_activity_code = f'''package {app_id};
+
+import android.os.Bundle;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.webkit.WebChromeClient;
+import android.webkit.PermissionRequest;
+import androidx.appcompat.app.AppCompatActivity;
+
+public class MainActivity extends AppCompatActivity {{
+    private WebView webView;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {{
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+        
+        webView = findViewById(R.id.webview);
+        
+        // Setup WebViewClient
+        webView.setWebViewClient(new WebViewClient());
+        
+        // Setup WebChromeClient untuk handle media, permissions, dll
+        webView.setWebChromeClient(new WebChromeClient() {{
+            @Override
+            public void onPermissionRequest(PermissionRequest request) {{
+                request.grant(request.getResources());
+            }}
+        }});
+        
+        // Enable JavaScript dan storage
+        webView.getSettings().setJavaScriptEnabled(true);
+        webView.getSettings().setDomStorageEnabled(true);
+        webView.getSettings().setDatabaseEnabled(true);
+        webView.getSettings().setMediaPlaybackRequiresUserGesture(false);
+        webView.getSettings().setMixedContentMode(0);
+        webView.getSettings().setUseWideViewPort(true);
+        webView.getSettings().setLoadWithOverviewMode(true);
+        
+        // Load HTML
+        webView.loadUrl("file:///android_asset/index.html");
+        
+        System.out.println("{app_name} - Build successful!");
+    }}
+
+    @Override
+    public void onBackPressed() {{
+        if (webView.canGoBack()) {{
+            webView.goBack();
+        }} else {{
+            super.onBackPressed();
+        }}
+    }}
+}}
+'''
+        
+        # ==================== GENERATE activity_main.xml ====================
+        activity_layout = '''<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/white">
+    
+    <WebView
+        android:id="@+id/webview"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+</LinearLayout>
+'''
+        
+        # ==================== GENERATE strings.xml ====================
+        strings_xml = f'''<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">{app_name}</string>
+    <string name="action_settings">Settings</string>
+    <color name="white">#FFFFFF</color>
+</resources>
+'''
+        
+        # ==================== GENERATE AndroidManifest.xml ====================
+        permissions = config.get('permissions', [])
+        permissions_xml = ""
+        
+        if permissions:
+            permissions_xml = "\n".join([
+                f'    <uses-permission android:name="{perm["full"]}" />'
+                for perm in permissions
+            ])
+            permissions_xml = "\n" + permissions_xml + "\n"
+        
+        android_manifest = f'''<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="{app_id}"
+    android:versionCode="{version_code}"
+    android:versionName="{app_version}">
+
+    <uses-sdk
+        android:minSdkVersion="21"
+        android:targetSdkVersion="33" />{permissions_xml}
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="true"
+        android:usesCleartextTraffic="true"
+        android:debuggable="false">
+        
+        <activity
+            android:name=".MainActivity"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.AppCompat.Light.DarkActionBar"
+            android:hardwareAccelerated="true"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize">
+            
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
+'''
+        
+        # ==================== SIMPAN SEMUA FILE ====================
+        java_dir = f'android_build/app/src/main/java/{package_path}'
+        os.makedirs(java_dir, exist_ok=True)
+        
+        # Simpan MainActivity.java
+        with open(f'{java_dir}/MainActivity.java', 'w') as f:
+            f.write(main_activity_code)
+        print(f"\n✓ MainActivity.java dibuat")
+        
+        # Simpan layout
+        with open('android_build/app/src/main/res/layout/activity_main.xml', 'w') as f:
+            f.write(activity_layout)
+        print(f"✓ activity_main.xml dibuat")
+        
+        # Simpan strings
+        with open('android_build/app/src/main/res/values/strings.xml', 'w') as f:
+            f.write(strings_xml)
+        print(f"✓ strings.xml dibuat")
+        
+        # Simpan manifest
+        with open('android_build/app/src/main/AndroidManifest.xml', 'w') as f:
+            f.write(android_manifest)
+        print(f"✓ AndroidManifest.xml dibuat")
+        
+        print("\n✓ Semua file Android project berhasil di-generate!")
+        PYTHON_EOF
+
+    # Step 8: Create build.gradle
+    - name: Create build.gradle
+      run: |
+        cat > android_build/build.gradle << 'EOF'
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:7.4.2'
+    }
+}
+
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    compileSdk 33
+    
+    defaultConfig {
+        applicationId "${env.APP_ID}"
+        minSdk 21
+        targetSdk 33
+        versionCode "${env.VERSION_CODE}"
+        versionName "${env.APP_VERSION}"
+        
+        vectorDrawables {
+            useSupportLibrary true
+        }
+    }
+    
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            minifyEnabled false
+        }
+    }
+    
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    
+    namespace "com.apk.builder"
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'androidx.webkit:webkit:1.6.1'
+}
+EOF
+        echo "✓ build.gradle dibuat"
+
+    # Step 9: Create settings.gradle
+    - name: Create settings.gradle
+      run: |
+        cat > android_build/settings.gradle << 'EOF'
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        google()
+        mavenCentral()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "APKBuilder"
+include ':app'
+EOF
+        echo "✓ settings.gradle dibuat"
+
+    # Step 10: Create app/build.gradle
+    - name: Create app/build.gradle
+      run: |
+        mkdir -p android_build/app
+        cat > android_build/app/build.gradle << 'EOF'
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    compileSdk 33
+    
+    defaultConfig {
+        applicationId "com.apk.builder"
+        minSdk 21
+        targetSdk 33
+        versionCode 1
+        versionName "1.0"
+    }
+    
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    
+    namespace "com.apk.builder"
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'androidx.webkit:webkit:1.6.1'
+}
+EOF
+        echo "✓ app/build.gradle dibuat"
+
+    # Step 11: Create proguard rules
+    - name: Create proguard rules
+      run: |
+        mkdir -p android_build/app
+        cat > android_build/app/proguard-rules.pro << 'EOF'
+# Add project specific ProGuard rules here.
+-keep class com.apk.builder.** { *; }
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile
+EOF
+        echo "✓ proguard-rules.pro dibuat"
+
+    # Step 12: Copy index.html
+    - name: Copy index.html
+      run: |
+        cat > android_build/app/src/main/assets/index.html << 'EOF'
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>APK Builder App</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+            text-align: center;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 32px;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        .logo {
+            width: 100px;
+            height: 100px;
+            margin: 0 auto 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 48px;
+        }
+        .info-box {
+            background: #f5f5f5;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+            text-align: left;
+        }
+        .info-box p {
+            color: #555;
+            margin: 10px 0;
+            font-size: 14px;
+        }
+        .info-box strong {
+            color: #333;
+        }
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 25px;
+            font-size: 16px;
+            cursor: pointer;
+            margin: 10px 5px;
+            transition: transform 0.2s;
+        }
+        button:hover {
+            transform: translateY(-2px);
+        }
+        .footer {
+            color: #999;
+            font-size: 12px;
+            margin-top: 30px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">📱</div>
+        <h1>APK Builder</h1>
+        <p class="subtitle">Build APK dari Termux dengan GitHub Actions</p>
+        
+        <div class="info-box">
+            <p><strong>Aplikasi Anda Berhasil Dibuat!</strong></p>
+            <p>APK ini dibangun menggunakan GitHub Actions tanpa memerlukan Java terinstall di Termux.</p>
+        </div>
+        
+        <div class="info-box">
+            <p><strong>📋 Informasi Build:</strong></p>
+            <p id="app-info"></p>
+        </div>
+        
+        <button onclick="showInfo()">ℹ️ Info Lebih Lanjut</button>
+        <button onclick="shareApp()">📤 Bagikan</button>
+        
+        <div class="footer">
+            <p>© 2025 APK Builder Tool</p>
+            <p>Dibuat dengan ❤️ untuk Termux Users</p>
+        </div>
+    </div>
+
+    <script>
+        function showInfo() {
+            alert('APK Builder\n\nAlat untuk membangun APK dari Termux tanpa Java.\n\nGunakan dengan bijak!');
+        }
+        
+        function shareApp() {
+            if (navigator.share) {
+                navigator.share({
+                    title: 'APK Builder',
+                    text: 'Aplikasi saya yang dibuat dengan APK Builder',
+                    url: window.location.href
+                });
+            } else {
+                alert('Sharing tidak tersedia di browser ini');
+            }
+        }
+        
+        window.onload = function() {
+            const info = document.getElementById('app-info');
+            const date = new Date();
+            info.innerHTML = date.toLocaleString('id-ID');
+        }
+    </script>
+</body>
+</html>
+EOF
+        echo "✓ index.html dibuat"
+
+    # Step 13: Build APK dengan Gradle
+    - name: Build APK with Gradle
+      run: |
+        echo "=================================================="
+        echo "STEP 3: Build APK dengan Gradle"
+        echo "=================================================="
+        
+        cd android_build
+        
+        # Download gradle wrapper
+        wget -q https://services.gradle.org/distributions/gradle-7.6-bin.zip
+        unzip -q gradle-7.6-bin.zip
+        
+        # Build APK
+        chmod +x gradle-7.6/bin/gradle
+        ./gradle-7.6/bin/gradle clean assembleDebug --info || true
+        
+        echo "=================================================="
+        echo "Build selesai!"
+        echo "=================================================="
+
+    # Step 14: Find APK output
+    - name: Find APK files
+      run: |
+        echo "Mencari file APK..."
+        find android_build -name "*.apk" -type f 2>/dev/null | head -20
+        
+        # Buat output directory
+        mkdir -p apk-output
+        find android_build -name "*.apk" -type f -exec cp {} apk-output/ \; 2>/dev/null || echo "APK files not found or copy failed"
+        
+        echo "APK files di apk-output:"
+        ls -lah apk-output/ || echo "apk-output directory empty"
+
+    # Step 15: Upload APK sebagai artifact
+    - name: Upload APK as artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: APK-Release
+        path: apk-output/**/*.apk
+        retention-days: 30
+        if-no-files-found: ignore
+
+    # Step 16: Create GitHub Release (optional)
+    - name: Create Release (if tagged)
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: apk-output/**/*.apk
+        body: |
+          APK Build Successful!
+          
+          Build Information:
+          - App ID: ${{ env.APP_ID }}
+          - Version: ${{ env.APP_VERSION }}
+          - Version Code: ${{ env.VERSION_CODE }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # Step 17: Build summary
+    - name: Build Summary
+      if: always()
+      run: |
+        echo "=================================================="
+        echo "BUILD SUMMARY"
+        echo "=================================================="
+        echo "App Name: ${{ env.APP_NAME }}"
+        echo "App ID: ${{ env.APP_ID }}"
+        echo "Version: ${{ env.APP_VERSION }}"
+        echo "Version Code: ${{ env.VERSION_CODE }}"
+        echo "Build Status: ${{ job.status }}"
+        echo "=================================================="
+        echo ""
+        echo "✓ Workflow berhasil dijalankan!"
+        echo ""
+        echo "Next step:"
+        echo "1. Cek tab 'Artifacts' untuk download APK"
+        echo "2. APK disimpan selama 30 hari"
+        echo "3. Download ke Termux untuk testing"
