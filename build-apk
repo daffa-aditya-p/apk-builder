@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""
+APK Builder - Build Android APK from Termux
+Main application entry point
+"""
+import sys
+import os
+from pathlib import Path
+
+# Add src directory to path
+sys.path.insert(0, str(Path(__file__).parent / 'src'))
+
+from auth import Auth
+from config import APKConfig
+from keystore_manager import KeystoreManager
+from github_builder import GitHubBuilder
+
+try:
+    from colorama import init, Fore, Style
+    init(autoreset=True)
+    
+    def print_success(msg):
+        print(f"{Fore.GREEN}✅ {msg}{Style.RESET_ALL}")
+    
+    def print_error(msg):
+        print(f"{Fore.RED}❌ {msg}{Style.RESET_ALL}")
+    
+    def print_info(msg):
+        print(f"{Fore.CYAN}ℹ️  {msg}{Style.RESET_ALL}")
+    
+    def print_warning(msg):
+        print(f"{Fore.YELLOW}⚠️  {msg}{Style.RESET_ALL}")
+    
+    def print_header(msg):
+        print(f"\n{Fore.MAGENTA}{'='*50}")
+        print(f"{msg:^50}")
+        print(f"{'='*50}{Style.RESET_ALL}\n")
+
+except ImportError:
+    # Fallback tanpa colorama
+    def print_success(msg):
+        print(f"✅ {msg}")
+    
+    def print_error(msg):
+        print(f"❌ {msg}")
+    
+    def print_info(msg):
+        print(f"ℹ️  {msg}")
+    
+    def print_warning(msg):
+        print(f"⚠️  {msg}")
+    
+    def print_header(msg):
+        print(f"\n{'='*50}")
+        print(f"{msg:^50}")
+        print(f"{'='*50}\n")
+
+
+class APKBuilderApp:
+    def __init__(self):
+        self.auth = Auth()
+        self.config = APKConfig()
+        self.keystore = KeystoreManager()
+        self.github = GitHubBuilder()
+    
+    def show_banner(self):
+        """Tampilkan banner aplikasi"""
+        banner = """
+    ╔═══════════════════════════════════════════════╗
+    ║                                               ║
+    ║           🚀 APK BUILDER TOOL 🚀              ║
+    ║                                               ║
+    ║     Build Android APK from Termux             ║
+    ║     No Java Installation Required!            ║
+    ║                                               ║
+    ╚═══════════════════════════════════════════════╝
+        """
+        print(banner)
+    
+    def auth_menu(self):
+        """Menu autentikasi"""
+        print_header("AUTENTIKASI")
+        print("1. Login")
+        print("2. Register")
+        print("3. Keluar")
+        
+        choice = input("\nPilihan: ").strip()
+        
+        if choice == "1":
+            username = input("Username: ").strip()
+            password = input("Password: ").strip()
+            
+            success, message = self.auth.login(username, password)
+            if success:
+                print_success(message)
+                return True
+            else:
+                print_error(message)
+                return False
+        
+        elif choice == "2":
+            print("\n=== REGISTRASI USER BARU ===\n")
+            username = input("Username: ").strip()
+            password = input("Password (min 6 karakter): ").strip()
+            password_confirm = input("Konfirmasi Password: ").strip()
+            
+            if password != password_confirm:
+                print_error("Password tidak cocok!")
+                return False
+            
+            success, message = self.auth.register(username, password)
+            if success:
+                print_success(message)
+                print_info("Silakan login dengan akun yang baru dibuat")
+                return False
+            else:
+                print_error(message)
+                return False
+        
+        elif choice == "3":
+            print_info("Terima kasih!")
+            sys.exit(0)
+        
+        else:
+            print_error("Pilihan tidak valid!")
+            return False
+    
+    def main_menu(self):
+        """Menu utama aplikasi"""
+        while True:
+            username = self.auth.get_current_user()
+            
+            print_header(f"MENU UTAMA - {username}")
+            print("1. 📦 Build APK")
+            print("2. ✍️  Sign APK")
+            print("3. 🔑 Buat Keystore")
+            print("4. 📋 Lihat Keystore")
+            print("5. ⚙️  Setup GitHub Token")
+            print("6. 📊 Cek Status Build")
+            print("7. 📥 Download APK")
+            print("8. 🚪 Logout")
+            print("9. ❌ Keluar")
+            
+            choice = input("\nPilihan: ").strip()
+            
+            if choice == "1":
+                self.build_apk_flow()
+            
+            elif choice == "2":
+                self.sign_apk_flow()
+            
+            elif choice == "3":
+                success, message = self.keystore.create_keystore()
+                if success:
+                    print_success(message)
+                else:
+                    print_error(message)
+                input("\nTekan Enter untuk melanjutkan...")
+            
+            elif choice == "4":
+                self.keystore.list_keystores()
+                input("\nTekan Enter untuk melanjutkan...")
+            
+            elif choice == "5":
+                success, message = self.github.setup_github_token()
+                if success:
+                    print_success(message)
+                else:
+                    print_error(message)
+                input("\nTekan Enter untuk melanjutkan...")
+            
+            elif choice == "6":
+                success, result = self.github.check_build_status()
+                if not success:
+                    print_error(result)
+                input("\nTekan Enter untuk melanjutkan...")
+            
+            elif choice == "7":
+                self.download_apk_flow()
+            
+            elif choice == "8":
+                self.auth.logout()
+                print_success("Berhasil logout!")
+                break
+            
+            elif choice == "9":
+                print_info("Terima kasih telah menggunakan APK Builder!")
+                sys.exit(0)
+            
+            else:
+                print_error("Pilihan tidak valid!")
+                input("\nTekan Enter untuk melanjutkan...")
+    
+    def build_apk_flow(self):
+        """Alur lengkap untuk build APK"""
+        print_header("BUILD APK")
+        
+        # Setup konfigurasi
+        print_info("Mulai setup konfigurasi project...")
+        config = self.config.setup_project()
+        
+        # Simpan konfigurasi
+        self.config.save_config()
+        
+        # Tampilkan ringkasan
+        self.config.display_config()
+        
+        confirm = input("Lanjutkan build? (y/n): ").strip().lower()
+        if confirm != 'y':
+            print_warning("Build dibatalkan")
+            return
+        
+        # Setup GitHub token jika belum
+        if not self.github.token:
+            print_info("GitHub token diperlukan untuk build di cloud")
+            success, message = self.github.setup_github_token()
+            if not success:
+                print_error(message)
+                return
+        
+        # Buat/dapatkan repository
+        success, message = self.github.create_or_get_repo()
+        if not success:
+            print_error(message)
+            return
+        
+        print_success(message)
+        
+        # Upload project files
+        print_info("Uploading project files ke GitHub...")
+        success, result = self.github.upload_project_files(config)
+        
+        if not success:
+            print_error(result)
+            return
+        
+        print_success(f"Berhasil upload ke branch: {result['branch']}")
+        
+        # Trigger build
+        success, message = self.github.trigger_build(config, result['branch'])
+        
+        if success:
+            print_success(message)
+            print_info("\n📊 Build sedang berjalan di GitHub Actions!")
+            print_info("Gunakan menu 'Cek Status Build' untuk melihat progress")
+            print_info("Setelah selesai, gunakan menu 'Download APK' untuk mengunduh hasil")
+        else:
+            print_error(message)
+        
+        input("\nTekan Enter untuk melanjutkan...")
+    
+    def sign_apk_flow(self):
+        """Alur untuk sign APK"""
+        print_header("SIGN APK")
+        
+        # Tampilkan keystore yang ada
+        keystores = self.keystore.list_keystores()
+        
+        if not keystores:
+            print_warning("Belum ada keystore!")
+            create = input("Buat keystore baru? (y/n): ").strip().lower()
+            if create == 'y':
+                self.keystore.create_keystore()
+            return
+        
+        # Pilih keystore
+        keystore_name = input("\nNama keystore yang akan digunakan: ").strip()
+        
+        # Lokasi APK
+        apk_path = input("Path APK yang akan di-sign: ").strip()
+        
+        # Sign APK
+        success, message = self.keystore.sign_apk(apk_path, keystore_name)
+        
+        if success:
+            print_success(message)
+        else:
+            print_error(message)
+        
+        input("\nTekan Enter untuk melanjutkan...")
+    
+    def download_apk_flow(self):
+        """Alur untuk download APK"""
+        print_header("DOWNLOAD APK")
+        
+        print_info("Mencari APK hasil build terakhir...")
+        
+        output_dir = input("Lokasi download (kosongkan untuk default): ").strip()
+        
+        success, result = self.github.download_apk(output_dir if output_dir else None)
+        
+        if success:
+            print_success(f"APK berhasil didownload!")
+            print_info(f"Lokasi: {result}")
+        else:
+            print_error(result)
+        
+        input("\nTekan Enter untuk melanjutkan...")
+    
+    def run(self):
+        """Jalankan aplikasi"""
+        self.show_banner()
+        
+        # Cek apakah sudah login
+        if not self.auth.is_logged_in():
+            while not self.auth_menu():
+                pass
+        else:
+            username = self.auth.get_current_user()
+            print_success(f"Selamat datang kembali, {username}!")
+        
+        # Masuk ke menu utama
+        self.main_menu()
+
+
+def main():
+    """Main entry point"""
+    try:
+        app = APKBuilderApp()
+        app.run()
+    except KeyboardInterrupt:
+        print("\n\n👋 Terima kasih telah menggunakan APK Builder!")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n❌ Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

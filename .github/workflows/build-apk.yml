@@ -1,52 +1,167 @@
-name: Build APK
+name: Build Android APK
 
-# Trigger workflow ketika:
 on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'Application Name'
+        required: true
+        default: 'MyApp'
+      app_id:
+        description: 'Application ID'
+        required: true
+        default: 'com.example.app'
+      version:
+        description: 'Version'
+        required: true
+        default: '1.0.0'
   push:
-    branches: [ main ]
     paths:
-      - 'builds/**'          # Hanya jika ada perubahan di folder builds/
-  workflow_dispatch:         # Bisa dipicu manual dari GitHub
-
-env:
-  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-  ANDROID_HOME: /usr/local/lib/android/sdk
+      - 'build-config.json'
+      - 'www/**'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     
     steps:
-    # Step 1: Checkout (download) repository
-    - name: Checkout repository
+    - name: Checkout code
       uses: actions/checkout@v3
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
       with:
-        fetch-depth: 0
-
-    # Step 2: Setup Java Development Kit
-    - name: Set up JDK 11
+        node-version: '18'
+    
+    - name: Setup Java
       uses: actions/setup-java@v3
       with:
-        java-version: '11'
-        distribution: 'adopt'
-        cache: gradle
-
-    # Step 3: Setup Android SDK
-    - name: Setup Android SDK
-      uses: android-actions/setup-android@v2
-      with:
-        api-level: 33
-        ndk-version: 25.1.8937393
-
-    # Step 4: Install dependencies
-    - name: Install system dependencies
+        distribution: 'temurin'
+        java-version: '17'
+    
+    - name: Install Cordova
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential \
-          gradle \
-          wget \
-          unzip
+        npm install -g cordova@latest
+        cordova --version
+    
+    - name: Read Build Configuration
+      id: config
+      run: |
+        if [ -f build-config.json ]; then
+          APP_NAME=$(jq -r '.app_name // "MyApp"' build-config.json)
+          APP_ID=$(jq -r '.app_id // "com.example.app"' build-config.json)
+          VERSION=$(jq -r '.version // "1.0.0"' build-config.json)
+          VERSION_CODE=$(jq -r '.version_code // 1' build-config.json)
+          
+          echo "app_name=$APP_NAME" >> $GITHUB_OUTPUT
+          echo "app_id=$APP_ID" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
+        else
+          echo "app_name=MyApp" >> $GITHUB_OUTPUT
+          echo "app_id=com.example.app" >> $GITHUB_OUTPUT
+          echo "version=1.0.0" >> $GITHUB_OUTPUT
+          echo "version_code=1" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Create Cordova Project
+      run: |
+        cordova create apk-project ${{ steps.config.outputs.app_id }} "${{ steps.config.outputs.app_name }}"
+        cd apk-project
+        cordova platform add android
+    
+    - name: Copy Web Files
+      run: |
+        if [ -d www ]; then
+          rm -rf apk-project/www/*
+          cp -r www/* apk-project/www/
+        fi
+    
+    - name: Configure Cordova
+      run: |
+        cd apk-project
+        
+        # Update config.xml
+        CONFIG_FILE="config.xml"
+        
+        # Set version
+        sed -i "s/version=\"1.0.0\"/version=\"${{ steps.config.outputs.version }}\"/" $CONFIG_FILE
+        sed -i "s/android-versionCode=\"1\"/android-versionCode=\"${{ steps.config.outputs.version_code }}\"/" $CONFIG_FILE
+        
+        # Add permissions if config exists
+        if [ -f ../build-config.json ]; then
+          # Read permissions from config
+          PERMISSIONS=$(jq -r '.permissions[]? // empty' ../build-config.json)
+          
+          # Add permissions to config.xml
+          for PERM in $PERMISSIONS; do
+            if ! grep -q "$PERM" $CONFIG_FILE; then
+              sed -i "/<\/widget>/i \    <uses-permission android:name=\"$PERM\" />" $CONFIG_FILE
+            fi
+          done
+          
+          # Set display options
+          ORIENTATION=$(jq -r '.display_options.orientation // "portrait"' ../build-config.json)
+          FULLSCREEN=$(jq -r '.display_options.fullscreen // false' ../build-config.json)
+          
+          sed -i "/<preference name=\"orientation\"/d" $CONFIG_FILE
+          sed -i "/<\/widget>/i \    <preference name=\"orientation\" value=\"$ORIENTATION\" />" $CONFIG_FILE
+          
+          if [ "$FULLSCREEN" = "true" ]; then
+            sed -i "/<preference name=\"Fullscreen\"/d" $CONFIG_FILE
+            sed -i "/<\/widget>/i \    <preference name=\"Fullscreen\" value=\"true\" />" $CONFIG_FILE
+          fi
+        fi
+        
+        cat $CONFIG_FILE
+    
+    - name: Copy Icon (if exists)
+      run: |
+        cd apk-project
+        if [ -f ../icon.png ]; then
+          mkdir -p res/icon/android
+          cp ../icon.png res/icon/android/icon.png
+        fi
+    
+    - name: Build APK
+      run: |
+        cd apk-project
+        cordova build android --release -- --packageType=apk
+    
+    - name: List Build Output
+      run: |
+        echo "Build output:"
+        find apk-project/platforms/android/app/build/outputs -type f -name "*.apk"
+    
+    - name: Rename APK
+      run: |
+        APK_FILE=$(find apk-project/platforms/android/app/build/outputs -type f -name "*.apk" | head -1)
+        if [ -f "$APK_FILE" ]; then
+          APP_NAME="${{ steps.config.outputs.app_name }}"
+          VERSION="${{ steps.config.outputs.version }}"
+          NEW_NAME="${APP_NAME// /_}-${VERSION}-unsigned.apk"
+          cp "$APK_FILE" "$NEW_NAME"
+          echo "APK_PATH=$NEW_NAME" >> $GITHUB_ENV
+        fi
+    
+    - name: Upload APK
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ steps.config.outputs.app_name }}-${{ steps.config.outputs.version }}
+        path: ${{ env.APK_PATH }}
+        retention-days: 30
+    
+    - name: Create Release (optional)
+      if: github.event_name == 'workflow_dispatch'
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ steps.config.outputs.version }}
+        name: ${{ steps.config.outputs.app_name }} v${{ steps.config.outputs.version }}
+        files: ${{ env.APK_PATH }}
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     # Step 5: Find dan parse config.json
     - name: Find and parse configuration
