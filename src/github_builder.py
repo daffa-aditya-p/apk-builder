@@ -19,6 +19,8 @@ class GitHubBuilder:
         }
         self.repo_owner = None
         self.repo_name = None
+        self.default_branch = "main"
+        self.workflow_source = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "build-apk.yml"
     
     def setup_github_token(self):
         """Setup GitHub token secara interaktif"""
@@ -100,7 +102,12 @@ class GitHubBuilder:
         response = requests.get(repo_url, headers=self.headers)
         
         if response.status_code == 200:
+            repo_data = response.json()
+            self.default_branch = repo_data.get("default_branch", "main")
             print(f"✅ Repository '{repo_name}' sudah ada")
+            workflow_ready, workflow_message = self._ensure_workflow_file()
+            if not workflow_ready:
+                return False, workflow_message
             return True, f"Repository: {self.repo_owner}/{repo_name}"
         
         # Buat repository baru
@@ -117,7 +124,12 @@ class GitHubBuilder:
         response = requests.post(create_url, headers=self.headers, json=payload)
         
         if response.status_code == 201:
+            repo_data = response.json()
+            self.default_branch = repo_data.get("default_branch", "main")
             print(f"✅ Repository '{repo_name}' berhasil dibuat!")
+            workflow_ready, workflow_message = self._ensure_workflow_file()
+            if not workflow_ready:
+                return False, workflow_message
             return True, f"Repository: {self.repo_owner}/{repo_name}"
         else:
             return False, f"Gagal membuat repository: {response.json().get('message', 'Unknown error')}"
@@ -137,12 +149,12 @@ class GitHubBuilder:
             # Buat branch baru untuk build ini
             branch_name = f"build-{int(time.time())}"
             
-            # Dapatkan SHA dari main branch
-            ref_url = f"{self.api_base}/repos/{self.repo_owner}/{self.repo_name}/git/refs/heads/main"
+            # Dapatkan SHA dari default branch
+            ref_url = f"{self.api_base}/repos/{self.repo_owner}/{self.repo_name}/git/refs/heads/{self.default_branch}"
             response = requests.get(ref_url, headers=self.headers)
             
             if response.status_code != 200:
-                return False, "Gagal mendapatkan info branch main"
+                return False, "Gagal mendapatkan info default branch repository"
             
             main_sha = response.json()['object']['sha']
             
@@ -155,47 +167,38 @@ class GitHubBuilder:
             
             response = requests.post(create_ref_url, headers=self.headers, json=payload)
             if response.status_code != 201:
-                print(f"⚠️  Gagal membuat branch baru, menggunakan main")
-                branch_name = "main"
+                print(f"⚠️  Gagal membuat branch baru, menggunakan default branch")
+                branch_name = self.default_branch
             
             # Upload file config
             config_content = json.dumps(config, indent=2)
             self._upload_file("build-config.json", config_content, branch_name)
             
-            # Upload project files (sampling untuk demo, bisa ditambah logic lengkap)
+            # Upload project files
             uploaded_files = []
             
-            # Jika HTML project
-            if config['project_type'] == 'html':
-                # Upload index.html jika ada
-                index_file = project_dir / "index.html"
-                if index_file.exists():
-                    with open(index_file, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    self._upload_file("www/index.html", content, branch_name)
-                    uploaded_files.append("index.html")
+            source_dir = project_dir
+            if config.get('project_type') == 'react':
+                react_build_candidates = [project_dir / "build", project_dir / "dist"]
+                source_dir = next((candidate for candidate in react_build_candidates if candidate.exists()), project_dir)
+            
+            for file_path in source_dir.rglob("*"):
+                if not file_path.is_file() or self._should_skip_path(file_path):
+                    continue
                 
-                # Upload CSS, JS, assets, dll
-                for pattern in ['*.css', '*.js', 'assets/*', 'img/*', 'images/*']:
-                    for file_path in project_dir.rglob(pattern.split('/')[-1]):
-                        if file_path.is_file():
-                            rel_path = file_path.relative_to(project_dir)
-                            with open(file_path, 'rb') as f:
-                                content = f.read()
-                            
-                            # Encode binary files
-                            if file_path.suffix.lower() in ['.png', '.jpg', '.jpeg', '.gif', '.ico']:
-                                content = base64.b64encode(content).decode()
-                                self._upload_file(f"www/{rel_path}", content, branch_name, is_binary=True)
-                            else:
-                                try:
-                                    content = content.decode('utf-8')
-                                    self._upload_file(f"www/{rel_path}", content, branch_name)
-                                except:
-                                    content = base64.b64encode(content).decode()
-                                    self._upload_file(f"www/{rel_path}", content, branch_name, is_binary=True)
-                            
-                            uploaded_files.append(str(rel_path))
+                rel_path = file_path.relative_to(source_dir)
+                with open(file_path, 'rb') as f:
+                    content = f.read()
+                
+                try:
+                    text_content = content.decode('utf-8')
+                    success = self._upload_file(f"www/{rel_path.as_posix()}", text_content, branch_name)
+                except UnicodeDecodeError:
+                    binary_content = base64.b64encode(content).decode()
+                    success = self._upload_file(f"www/{rel_path.as_posix()}", binary_content, branch_name, is_binary=True)
+                
+                if success:
+                    uploaded_files.append(str(rel_path))
             
             print(f"✅ Berhasil upload {len(uploaded_files)} file")
             
@@ -206,6 +209,33 @@ class GitHubBuilder:
         
         except Exception as e:
             return False, f"Error saat upload: {str(e)}"
+
+    def _should_skip_path(self, file_path):
+        """Skip files/folders yang tidak relevan untuk upload build"""
+        parts = set(file_path.parts)
+        ignored_dirs = {".git", ".github", "node_modules", "__pycache__", ".next", ".cache", "venv", ".venv"}
+        if ignored_dirs.intersection(parts):
+            return True
+        if file_path.name.startswith("."):
+            return True
+        return False
+
+    def _ensure_workflow_file(self):
+        """Pastikan workflow build tersedia di repository target"""
+        if not self.workflow_source.exists():
+            return False, f"Workflow template tidak ditemukan: {self.workflow_source}"
+        
+        with open(self.workflow_source, "r", encoding="utf-8") as f:
+            workflow_content = f.read()
+        
+        uploaded = self._upload_file(
+            ".github/workflows/build-apk.yml",
+            workflow_content,
+            self.default_branch
+        )
+        if not uploaded:
+            return False, "Gagal menyiapkan workflow build di repository target"
+        return True, "Workflow siap digunakan"
     
     def _upload_file(self, file_path, content, branch, is_binary=False):
         """Upload single file ke repository"""
